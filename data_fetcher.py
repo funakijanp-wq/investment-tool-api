@@ -3,6 +3,7 @@
 from __future__ import annotations
 import yfinance as yf
 import pandas as pd
+import requests
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -42,7 +43,11 @@ def fetch(ticker: str) -> StockData:
     ティッカーシンボルから StockData を取得して返す。
     取得できなかった項目は None のまま返す（後段で欠損として扱う）。
     """
-    t = yf.Ticker(ticker)
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
+    })
+    t = yf.Ticker(ticker, session=session)
     info = t.info or {}
 
     data = StockData(ticker=ticker.upper(), raw=info)

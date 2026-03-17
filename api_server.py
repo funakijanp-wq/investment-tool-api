@@ -25,7 +25,7 @@ app = Flask(__name__)
 CORS(app)  # Next.js からのクロスオリジンリクエストを許可
 
 # ─── インメモリキャッシュ（yfinance の過剰アクセスを防ぐ） ─────────────────
-CACHE_TTL_SECONDS = 300  # 5分
+CACHE_TTL_SECONDS = 3600  # 1時間
 
 _cache: dict = {
     "scores":    {"data": None, "expires_at": 0},
@@ -146,6 +146,8 @@ def _fetch_scores_data(tickers: list[str], news_adj: int) -> dict:
                 "fundamentals": {"is_etf": False},
                 "meta": {"country": "", "sector": "", "tech_reason": str(e)},
             })
+        finally:
+            time.sleep(2)  # レートリミット対策
 
     # 総合スコア降順ソート
     items.sort(key=lambda x: x["scores"]["combined"], reverse=True)
