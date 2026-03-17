@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 import yfinance as yf
 import pandas as pd
-import requests
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -62,11 +61,7 @@ def fetch(ticker: str) -> StockData:
 
 def _fetch_once(ticker: str) -> StockData:
     """yf.Ticker().info を使った通常の取得。"""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
-    })
-    t = yf.Ticker(ticker, session=session)
+    t = yf.Ticker(ticker)
     info = t.info or {}
 
     # info が空 or 無効なら例外にしてリトライを促す
@@ -123,14 +118,7 @@ def _fetch_download_fallback(ticker: str) -> StockData:
     yf.download() を使った最小限のフォールバック。
     ファンダメンタルズは取得できないが、銘柄が0点エラーになるのを防ぐ。
     """
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
-    })
-    df = yf.download(
-        ticker, period="5d", auto_adjust=True,
-        progress=False, session=session
-    )
+    df = yf.download(ticker, period="5d", auto_adjust=True, progress=False)
     data = StockData(ticker=ticker.upper())
     data.name = ticker.upper()
     if df is not None and not df.empty:
