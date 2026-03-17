@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import os
 import time
+import json
 import threading
 from datetime import datetime, timezone
 from flask import Flask, jsonify, Response
@@ -26,12 +27,16 @@ CORS(app)  # Next.js からのクロスオリジンリクエストを許可
 
 # ─── インメモリキャッシュ（yfinance の過剰アクセスを防ぐ） ─────────────────
 CACHE_TTL_SECONDS = 3600  # 1時間
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "cache.json")
 
 _cache: dict = {
     "scores":    {"data": None, "expires_at": 0},
     "sentiment": {"data": None, "expires_at": 0},
 }
 _cache_lock = threading.Lock()
+
+# ticker ごとの最終成功データ（stale fallback 用）
+_ticker_cache: dict[str, dict] = {}
 
 
 def _is_fresh(key: str) -> bool:
@@ -46,6 +51,30 @@ def _set_cache(key: str, data: dict) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ─── ファイルキャッシュ（再起動後も stale data を保持） ──────────────────
+
+def _load_file_cache() -> None:
+    """起動時に cache.json から ticker ごとの最終成功データを読み込む。"""
+    global _ticker_cache
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                _ticker_cache = json.load(f)
+            print(f"  [cache] {len(_ticker_cache)} 銘柄の stale キャッシュを読み込みました")
+    except Exception as e:
+        print(f"  [cache] cache.json 読み込み失敗: {e}")
+        _ticker_cache = {}
+
+
+def _save_file_cache() -> None:
+    """ticker ごとの最終成功データを cache.json に保存する。"""
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_ticker_cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  [cache] cache.json 保存失敗: {e}")
 
 
 # ─── データ取得ロジック ────────────────────────────────────────────────────
@@ -87,17 +116,19 @@ def _fetch_scores_data(tickers: list[str], news_adj: int) -> dict:
         return _cache["scores"]["data"]
 
     items = []
+    file_cache_updated = False
+
     for ticker in tickers:
         try:
-            stock   = fetch(ticker)
+            stock    = fetch(ticker)
             f_detail = calc_fundamental(stock)
-            tech    = analyze(ticker)
+            tech     = analyze(ticker)
 
             f_score  = f_detail.total + news_adj
             combined = round(f_score * 0.6 + tech.score * 0.4)
             vd       = verdict(combined)
 
-            items.append({
+            item = {
                 "ticker":   ticker,
                 "name":     stock.name,
                 "signal":   tech.signal,
@@ -134,20 +165,39 @@ def _fetch_scores_data(tickers: list[str], news_adj: int) -> dict:
                     "sector":  stock.sector,
                     "tech_reason": tech.reason,
                 },
-            })
+            }
+            items.append(item)
+
+            # 成功したエントリをファイルキャッシュに保存
+            _ticker_cache[ticker] = item
+            file_cache_updated = True
+
         except Exception as e:
-            items.append({
-                "ticker": ticker, "name": ticker,
-                "signal": "neutral", "signal_jp": "中立",
-                "verdict": "❌ エラー",
-                "scores": {"fundamental": 0, "technical": 0, "combined": 0,
-                           "geopolitical": 0, "macro": 0, "business": 0, "sector": 0},
-                "indicators": {},
-                "fundamentals": {"is_etf": False},
-                "meta": {"country": "", "sector": "", "tech_reason": str(e)},
-            })
+            # stale ファイルキャッシュがあればそちらを使用
+            if ticker in _ticker_cache:
+                stale_item = dict(_ticker_cache[ticker])
+                stale_item["meta"] = dict(stale_item.get("meta", {}))
+                stale_item["meta"]["tech_reason"] = f"[stale] {str(e)}"
+                stale_item["verdict"] = stale_item.get("verdict", "⚠️ stale") + " ⚠️"
+                items.append(stale_item)
+                print(f"[STALE] {ticker}: using cached data ({e})")
+            else:
+                items.append({
+                    "ticker": ticker, "name": ticker,
+                    "signal": "neutral", "signal_jp": "中立",
+                    "verdict": "❌ エラー",
+                    "scores": {"fundamental": 0, "technical": 0, "combined": 0,
+                               "geopolitical": 0, "macro": 0, "business": 0, "sector": 0},
+                    "indicators": {},
+                    "fundamentals": {"is_etf": False},
+                    "meta": {"country": "", "sector": "", "tech_reason": str(e)},
+                })
         finally:
             time.sleep(2)  # レートリミット対策
+
+    # 成功エントリがあればファイルキャッシュを更新
+    if file_cache_updated:
+        _save_file_cache()
 
     # 総合スコア降順ソート
     items.sort(key=lambda x: x["scores"]["combined"], reverse=True)
@@ -208,6 +258,7 @@ def api_health() -> Response:
         "cache_ttl": CACHE_TTL_SECONDS,
         "scores_cached":    _is_fresh("scores"),
         "sentiment_cached": _is_fresh("sentiment"),
+        "file_cache_tickers": list(_ticker_cache.keys()),
         "updated_at": _now_iso(),
     })
 
@@ -227,6 +278,9 @@ def index() -> Response:
 
 
 # ─── 起動 ─────────────────────────────────────────────────────────────────
+
+# 起動時にファイルキャッシュを読み込む
+_load_file_cache()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))

@@ -1,6 +1,7 @@
 # data_fetcher.py - yfinanceを使った株データ取得
 
 from __future__ import annotations
+import time
 import yfinance as yf
 import pandas as pd
 import requests
@@ -41,14 +42,39 @@ class StockData:
 def fetch(ticker: str) -> StockData:
     """
     ティッカーシンボルから StockData を取得して返す。
-    取得できなかった項目は None のまま返す（後段で欠損として扱う）。
+    失敗時は最大3回リトライし、それでも失敗した場合は yf.download() でフォールバック。
     """
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            return _fetch_once(ticker)
+        except Exception as e:
+            last_exc = e
+            if attempt < 2:
+                wait = 10 * (attempt + 1)
+                print(f"[RETRY] {ticker}: attempt {attempt+1} failed ({e}), waiting {wait}s")
+                time.sleep(wait)
+
+    # yf.download() フォールバック（価格データのみ、ファンダメンタルズは None）
+    print(f"[FALLBACK] {ticker}: switching to yf.download() after 3 failures")
+    return _fetch_download_fallback(ticker)
+
+
+def _fetch_once(ticker: str) -> StockData:
+    """yf.Ticker().info を使った通常の取得。"""
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
     })
     t = yf.Ticker(ticker, session=session)
     info = t.info or {}
+
+    # info が空 or 無効なら例外にしてリトライを促す
+    if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None and info.get("navPrice") is None:
+        symbol_type = info.get("quoteType", "")
+        # ETFはnavPriceがないこともある — longNameがあれば有効とみなす
+        if not info.get("longName") and not info.get("shortName"):
+            raise ValueError(f"Empty or invalid info for {ticker}")
 
     data = StockData(ticker=ticker.upper(), raw=info)
 
@@ -64,10 +90,9 @@ def fetch(ticker: str) -> StockData:
         data.is_etf = True
         data.etf_category = info.get("category", "")
         data.expense_ratio = _to_float(info.get("netExpenseRatio"))
-        # ETFでも PER・配当利回りは取得可能
         data.per = _to_float(info.get("trailingPE"))
         data.dividend_yield = _normalize_dividend_yield(info.get("dividendYield"))
-        return data  # 財務諸表は不要なので早期リターン
+        return data
 
     # ─── バリュエーション ──────────────────────────────────────────────
     data.per = _to_float(info.get("trailingPE"))
@@ -75,8 +100,6 @@ def fetch(ticker: str) -> StockData:
     data.dividend_yield = _normalize_dividend_yield(info.get("dividendYield"))
 
     # ─── 成長性 ───────────────────────────────────────────────────────
-    # EPS成長率：earningsQuarterlyGrowth（QoQ）を使いYoY代替。
-    # より精度が必要な場合は financials から計算。
     eps_qoq = _to_float(info.get("earningsQuarterlyGrowth"))
     if eps_qoq is not None:
         data.eps_growth = eps_qoq * 100
@@ -92,6 +115,27 @@ def fetch(ticker: str) -> StockData:
     # ─── 財務健全性 ───────────────────────────────────────────────────
     data.equity_ratio = _calc_equity_ratio(t, info)
 
+    return data
+
+
+def _fetch_download_fallback(ticker: str) -> StockData:
+    """
+    yf.download() を使った最小限のフォールバック。
+    ファンダメンタルズは取得できないが、銘柄が0点エラーになるのを防ぐ。
+    """
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
+    })
+    df = yf.download(
+        ticker, period="5d", auto_adjust=True,
+        progress=False, session=session
+    )
+    data = StockData(ticker=ticker.upper())
+    data.name = ticker.upper()
+    if df is not None and not df.empty:
+        # 最新終値を raw に格納（スコアリングでは使わないがデバッグ用）
+        data.raw = {"close": float(df["Close"].iloc[-1])}
     return data
 
 
@@ -119,7 +163,6 @@ def _calc_eps_growth_from_financials(t: yf.Ticker) -> Optional[float]:
         if fin is None or fin.empty:
             return None
 
-        # 純利益ベースで代替
         row_keys = ["Net Income", "Net Income Common Stockholders"]
         ni_row = None
         for k in row_keys:
@@ -164,7 +207,7 @@ def _calc_revenue_growth_from_financials(t: yf.Ticker) -> Optional[float]:
 def _calc_equity_ratio(t: yf.Ticker, info: dict) -> Optional[float]:
     """
     自己資本比率 = 純資産 / 総資産 × 100
-    balance_sheet から取得する。info の quickRatio 等では代替不可なため直接計算。
+    balance_sheet から取得する。
     """
     try:
         bs = t.balance_sheet
@@ -176,9 +219,7 @@ def _calc_equity_ratio(t: yf.Ticker, info: dict) -> Optional[float]:
             "Total Stockholders Equity",
             "Common Stock Equity",
         ]
-        asset_keys = [
-            "Total Assets",
-        ]
+        asset_keys = ["Total Assets"]
 
         equity_row, asset_row = None, None
         for k in equity_keys:
