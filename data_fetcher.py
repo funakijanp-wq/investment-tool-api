@@ -123,25 +123,36 @@ def _fetch_download_fallback(ticker: str) -> StockData:
     data.name = ticker.upper()
     if df is not None and not df.empty:
         # 最新終値を raw に格納（スコアリングでは使わないがデバッグ用）
-        data.raw = {"close": float(df["Close"].iloc[-1])}
+        data.raw = {"close": safe_float(df["Close"].iloc[-1])}
     return data
 
 
 # ─── 内部ヘルパー ──────────────────────────────────────────────────────────
 
+def safe_float(value) -> Optional[float]:
+    """SeriesやDataFrameから安全にfloat値を取得"""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, pd.Series):
+            return float(value.iloc[0]) if len(value) > 0 else None
+        if isinstance(value, pd.DataFrame):
+            return float(value.iloc[0, 0]) if not value.empty else None
+        return float(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _normalize_dividend_yield(raw) -> Optional[float]:
     """dividendYield を % 表記に統一（0.40→0.40%、0.004→0.4%）。"""
-    div = _to_float(raw)
+    div = safe_float(raw)
     if div is None:
         return None
     return div * 100 if div < 0.1 else div
 
 
 def _to_float(val) -> Optional[float]:
-    try:
-        return float(val) if val is not None else None
-    except (TypeError, ValueError):
-        return None
+    return safe_float(val)
 
 
 def _calc_eps_growth_from_financials(t: yf.Ticker) -> Optional[float]:
@@ -160,8 +171,8 @@ def _calc_eps_growth_from_financials(t: yf.Ticker) -> Optional[float]:
         if ni_row is None or len(ni_row) < 2:
             return None
 
-        ni_new, ni_old = float(ni_row.iloc[0]), float(ni_row.iloc[1])
-        if ni_old == 0:
+        ni_new, ni_old = safe_float(ni_row.iloc[0]), safe_float(ni_row.iloc[1])
+        if ni_new is None or ni_old is None or ni_old == 0:
             return None
         return (ni_new - ni_old) / abs(ni_old) * 100
     except Exception:
@@ -184,8 +195,8 @@ def _calc_revenue_growth_from_financials(t: yf.Ticker) -> Optional[float]:
         if rev_row is None or len(rev_row) < 2:
             return None
 
-        r_new, r_old = float(rev_row.iloc[0]), float(rev_row.iloc[1])
-        if r_old == 0:
+        r_new, r_old = safe_float(rev_row.iloc[0]), safe_float(rev_row.iloc[1])
+        if r_new is None or r_old is None or r_old == 0:
             return None
         return (r_new - r_old) / abs(r_old) * 100
     except Exception:
@@ -222,9 +233,9 @@ def _calc_equity_ratio(t: yf.Ticker, info: dict) -> Optional[float]:
         if equity_row is None or asset_row is None:
             return None
 
-        equity = float(equity_row.iloc[0])
-        assets = float(asset_row.iloc[0])
-        if assets == 0:
+        equity = safe_float(equity_row.iloc[0])
+        assets = safe_float(asset_row.iloc[0])
+        if equity is None or assets is None or assets == 0:
             return None
         return equity / assets * 100
     except Exception:
