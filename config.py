@@ -128,4 +128,4 @@ ETF_EXPENSE_RATIO_SCORES = [
 ]
 
 # ─── デフォルト銘柄リスト ─────────────────────────────────────────────────
-DEFAULT_TICKERS = ["AAPL", "NVDA", "VTI", "LMT", "XOM"]
+DEFAULT_TICKERS = ["AAPL", "NVDA", "VTI", "LMT", "XOM", "QQQ", "JNJ", "KO", "PG", "VZ"]
